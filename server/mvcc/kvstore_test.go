@@ -544,13 +544,11 @@ func TestHashKVWhenCompacting(t *testing.T) {
 	}
 
 	hashCompactc := make(chan hashKVResult, 1)
-
 	donec := make(chan struct{})
-	var wg sync.WaitGroup
+
+	// Call HashByRev(10000) in multiple goroutines until donec is closed
 	for i := 0; i < 10; i++ {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			for {
 				hash, _, compactRev, err := s.HashByRev(int64(rev))
 				if err != nil {
@@ -565,10 +563,10 @@ func TestHashKVWhenCompacting(t *testing.T) {
 		}()
 	}
 
+	// Check computed hashes by HashByRev are correct in a goroutine, until donec is closed
 	go func() {
-		defer close(donec)
 		revHash := make(map[int64]uint32)
-		for round := 0; round < 1000; round++ {
+		for {
 			r := <-hashCompactc
 			if revHash[r.compactRev] == 0 {
 				revHash[r.compactRev] = r.hash
@@ -576,24 +574,33 @@ func TestHashKVWhenCompacting(t *testing.T) {
 			if r.hash != revHash[r.compactRev] {
 				t.Errorf("Hashes differ (current %v) != (saved %v)", r.hash, revHash[r.compactRev])
 			}
+
+			select {
+			case <-donec:
+				return
+			default:
+			}
 		}
 	}()
 
-	wg.Add(1)
+	// Compact the store in a goroutine, using revision 9900 to 10000 and close donec when finished
 	go func() {
-		defer wg.Done()
+		defer close(donec)
 		for i := 100; i >= 0; i-- {
-			_, err := s.Compact(traceutil.TODO(), int64(rev-1-i))
+			_, err := s.Compact(traceutil.TODO(), int64(rev-i))
 			if err != nil {
 				t.Error(err)
 			}
+			// Wait for the compaction job to finish
+			s.fifoSched.WaitFinish(1)
+			// Leave time for calls to HashByRev to take place after each compaction
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 
 	select {
 	case <-donec:
-		wg.Wait()
+		return
 	case <-time.After(10 * time.Second):
 		testutil.FatalStack(t, "timeout")
 	}
